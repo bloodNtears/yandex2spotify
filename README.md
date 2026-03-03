@@ -64,6 +64,7 @@ Valid values for `--ignore`: `likes`, `playlists`, `albums`, `artists`.
 | `--yandex-token`   | `-t`  | Yandex Music OAuth token        | (required) |
 | `--ignore`         | `-i`  | Item types to skip              | (none)     |
 | `--timeout`        |       | HTTP request timeout in seconds | `10`       |
+| `--cache-file`     |       | Path to search results cache    | `~/.yandex2spotify/cache.json` |
 
 ## How it works
 
@@ -75,6 +76,8 @@ Valid values for `--ignore`: `likes`, `playlists`, `albums`, `artists`.
    - **Albums**: fetches liked albums, searches on Spotify, saves matches to your library
    - **Artists**: fetches liked artists, searches on Spotify, follows matches
 4. Prints a summary of items that could not be found on Spotify
+
+Successfully matched items are cached to `~/.yandex2spotify/cache.json`. If the process is interrupted, re-running the command will skip already-matched items and resume from where it left off. Items that were not found are always re-searched.
 
 ## License
 

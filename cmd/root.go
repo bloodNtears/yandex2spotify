@@ -7,9 +7,11 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bloodNtears/yandex2spotify/internal/cache"
 	"github.com/bloodNtears/yandex2spotify/internal/importer"
 	"github.com/bloodNtears/yandex2spotify/internal/yandex"
 	"github.com/spf13/cobra"
@@ -26,6 +28,7 @@ var (
 	yandexToken   string
 	ignoreItems   []string
 	timeout       float64
+	cacheFile     string
 )
 
 var rootCmd = &cobra.Command{
@@ -35,12 +38,21 @@ var rootCmd = &cobra.Command{
 	RunE:  run,
 }
 
+func defaultCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".yandex2spotify-cache.json"
+	}
+	return filepath.Join(home, ".yandex2spotify", "cache.json")
+}
+
 func init() {
 	rootCmd.Flags().StringVar(&spotifyID, "spotify-id", "", "Spotify application Client ID (required)")
 	rootCmd.Flags().StringVar(&spotifySecret, "spotify-secret", "", "Spotify application Client Secret (required)")
 	rootCmd.Flags().StringVarP(&yandexToken, "yandex-token", "t", "", "Yandex Music OAuth token (required)")
 	rootCmd.Flags().StringSliceVarP(&ignoreItems, "ignore", "i", nil, "Items to skip: likes,playlists,albums,artists")
 	rootCmd.Flags().Float64Var(&timeout, "timeout", 10, "HTTP request timeout in seconds")
+	rootCmd.Flags().StringVar(&cacheFile, "cache-file", defaultCachePath(), "Path to the search results cache file")
 
 	rootCmd.MarkFlagRequired("spotify-id")
 	rootCmd.MarkFlagRequired("spotify-secret")
@@ -66,12 +78,21 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("spotify auth: %w", err)
 	}
 
-	imp, err := importer.New(yc, sc)
+	c, err := cache.Load(cacheFile)
+	if err != nil {
+		return fmt.Errorf("load cache: %w", err)
+	}
+	log.Printf("Cache file: %s", cacheFile)
+
+	imp, err := importer.New(yc, sc, c)
 	if err != nil {
 		return fmt.Errorf("init importer: %w", err)
 	}
 
-	imp.ImportAll(cmd.Context(), ignore)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Hour)
+	defer cancel()
+
+	imp.ImportAll(ctx, ignore)
 	return nil
 }
 
