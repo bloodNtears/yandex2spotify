@@ -46,7 +46,7 @@ func New(yc *yandex.Client, sc *spotify.Client, c *cache.Cache) (*Importer, erro
 		spotifyUID:  spotifyUser.ID,
 		yandexUID:   status.Account.UID,
 		cache:       c,
-		limiter:     rate.NewLimiter(rate.Every(300*time.Millisecond), 1), // ~3.33 rps, burst 1
+		limiter:     rate.NewLimiter(rate.Every(500*time.Millisecond), 1), // ~3.33 rps, burst 1
 		notImported: make(map[string][]string),
 	}, nil
 }
@@ -100,10 +100,31 @@ func (imp *Importer) importLikes(ctx context.Context) {
 		return
 	}
 
-	for _, chunk := range chunkIDs(spotifyIDs, 50) {
+	var newIDs []spotify.ID
+	for _, id := range spotifyIDs {
+		if !imp.cache.IsLikeSaved(string(id)) {
+			newIDs = append(newIDs, id)
+		}
+	}
+
+	if len(newIDs) == 0 {
+		log.Printf("All %d liked tracks already saved, skipping", len(spotifyIDs))
+		return
+	}
+	log.Printf("%d of %d liked tracks already saved, saving %d new",
+		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
+
+	for _, chunk := range chunkIDs(newIDs, 50) {
 		log.Printf("Saving %d liked tracks...", len(chunk))
 		if err := imp.spotify.AddTracksToLibrary(ctx, chunk...); err != nil {
 			log.Printf("ERROR: save liked tracks: %v", err)
+			continue
+		}
+		for _, id := range chunk {
+			imp.cache.MarkLikeSaved(string(id))
+		}
+		if err := imp.cache.Save(); err != nil {
+			log.Printf("WARNING: save cache: %v", err)
 		}
 	}
 }
@@ -128,6 +149,7 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 
 	section := pl.Title
 	imp.notImported[section] = nil
+	cacheKey := strconv.Itoa(pl.Kind)
 
 	fullPlaylist, err := imp.yandex.PlaylistTracks(ctx, imp.yandexUID, pl.Kind)
 	if err != nil {
@@ -147,12 +169,23 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 		return
 	}
 
-	spotifyPlaylist, err := imp.spotify.CreatePlaylistForUser(ctx, imp.spotifyUID, pl.Title, "", true, false)
-	if err != nil {
-		log.Printf("ERROR: create Spotify playlist %q: %v", pl.Title, err)
-		return
+	var spotifyPlaylistID spotify.ID
+	if entry, ok := imp.cache.GetPlaylist(cacheKey); ok {
+		spotifyPlaylistID = spotify.ID(entry.SpotifyID)
+		log.Printf("Using cached Spotify playlist for %q (ID: %s)", pl.Title, spotifyPlaylistID)
+	} else {
+		spotifyPlaylist, err := imp.spotify.CreatePlaylistForUser(ctx, imp.spotifyUID, pl.Title, "", false, false)
+		if err != nil {
+			log.Printf("ERROR: create Spotify playlist %q: %v", pl.Title, err)
+			return
+		}
+		spotifyPlaylistID = spotifyPlaylist.ID
+		imp.cache.SetPlaylist(cacheKey, string(spotifyPlaylistID))
+		if err := imp.cache.Save(); err != nil {
+			log.Printf("WARNING: save cache: %v", err)
+		}
+		log.Printf("Created Spotify playlist: %s (ID: %s)", spotifyPlaylist.Name, spotifyPlaylistID)
 	}
-	log.Printf("Created Spotify playlist: %s (ID: %s)", spotifyPlaylist.Name, spotifyPlaylist.ID)
 
 	spotifyIDs := imp.searchTracks(ctx, tracks, section)
 	if len(spotifyIDs) == 0 {
@@ -160,11 +193,33 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 		return
 	}
 
-	for _, chunk := range chunkIDs(spotifyIDs, 100) {
+	entry, _ := imp.cache.GetPlaylist(cacheKey)
+	var newIDs []spotify.ID
+	for _, id := range spotifyIDs {
+		if !entry.AddedTracks[string(id)] {
+			newIDs = append(newIDs, id)
+		}
+	}
+
+	if len(newIDs) == 0 {
+		log.Printf("All %d tracks already added to playlist %q, skipping", len(spotifyIDs), pl.Title)
+		return
+	}
+	log.Printf("%d of %d tracks already added, adding %d new tracks to playlist %q",
+		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs), pl.Title)
+
+	for _, chunk := range chunkIDs(newIDs, 100) {
 		log.Printf("Adding %d tracks to playlist %q...", len(chunk), pl.Title)
-		_, err := imp.spotify.AddTracksToPlaylist(ctx, spotifyPlaylist.ID, chunk...)
+		_, err := imp.spotify.AddTracksToPlaylist(ctx, spotifyPlaylistID, chunk...)
 		if err != nil {
 			log.Printf("ERROR: add tracks to playlist: %v", err)
+			continue
+		}
+		for _, id := range chunk {
+			imp.cache.AddPlaylistTrack(cacheKey, string(id))
+		}
+		if err := imp.cache.Save(); err != nil {
+			log.Printf("WARNING: save cache: %v", err)
 		}
 	}
 }
@@ -235,10 +290,31 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 		return
 	}
 
-	for _, chunk := range chunkIDs(spotifyIDs, 50) {
+	var newIDs []spotify.ID
+	for _, id := range spotifyIDs {
+		if !imp.cache.IsAlbumSaved(string(id)) {
+			newIDs = append(newIDs, id)
+		}
+	}
+
+	if len(newIDs) == 0 {
+		log.Printf("All %d albums already saved, skipping", len(spotifyIDs))
+		return
+	}
+	log.Printf("%d of %d albums already saved, saving %d new",
+		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
+
+	for _, chunk := range chunkIDs(newIDs, 50) {
 		log.Printf("Saving %d albums...", len(chunk))
 		if err := imp.spotify.AddAlbumsToLibrary(ctx, chunk...); err != nil {
 			log.Printf("ERROR: save albums: %v", err)
+			continue
+		}
+		for _, id := range chunk {
+			imp.cache.MarkAlbumSaved(string(id))
+		}
+		if err := imp.cache.Save(); err != nil {
+			log.Printf("WARNING: save cache: %v", err)
 		}
 	}
 }
@@ -297,10 +373,31 @@ func (imp *Importer) importArtists(ctx context.Context) {
 		return
 	}
 
-	for _, chunk := range chunkIDs(spotifyIDs, 50) {
+	var newIDs []spotify.ID
+	for _, id := range spotifyIDs {
+		if !imp.cache.IsArtistSaved(string(id)) {
+			newIDs = append(newIDs, id)
+		}
+	}
+
+	if len(newIDs) == 0 {
+		log.Printf("All %d artists already followed, skipping", len(spotifyIDs))
+		return
+	}
+	log.Printf("%d of %d artists already followed, following %d new",
+		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
+
+	for _, chunk := range chunkIDs(newIDs, 50) {
 		log.Printf("Following %d artists...", len(chunk))
 		if err := imp.spotify.FollowArtist(ctx, chunk...); err != nil {
 			log.Printf("ERROR: follow artists: %v", err)
+			continue
+		}
+		for _, id := range chunk {
+			imp.cache.MarkArtistSaved(string(id))
+		}
+		if err := imp.cache.Save(); err != nil {
+			log.Printf("WARNING: save cache: %v", err)
 		}
 	}
 }

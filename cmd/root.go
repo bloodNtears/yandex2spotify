@@ -89,7 +89,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("init importer: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Hour)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 48*time.Hour)
 	defer cancel()
 
 	imp.ImportAll(ctx, ignore)
