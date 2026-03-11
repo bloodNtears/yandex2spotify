@@ -19,26 +19,22 @@ type Cache struct {
 	mu   sync.Mutex
 	path string
 
-	Tracks  map[string]string `json:"tracks"`
-	Albums  map[string]string `json:"albums"`
-	Artists map[string]string `json:"artists"`
+	Tracks map[string]string `json:"tracks"`
+	Albums map[string]string `json:"albums"`
 
-	Playlists    map[string]*PlaylistEntry `json:"playlists"`
-	SavedLikes   map[string]bool           `json:"saved_likes"`
-	SavedAlbums  map[string]bool           `json:"saved_albums"`
-	SavedArtists map[string]bool           `json:"saved_artists"`
+	Playlists   map[string]*PlaylistEntry `json:"playlists"`
+	SavedLikes  map[string]bool           `json:"saved_likes"`
+	SavedAlbums map[string]bool           `json:"saved_albums"`
 }
 
 func Load(path string) (*Cache, error) {
 	c := &Cache{
-		path:         path,
-		Tracks:       make(map[string]string),
-		Albums:       make(map[string]string),
-		Artists:      make(map[string]string),
-		Playlists:    make(map[string]*PlaylistEntry),
-		SavedLikes:   make(map[string]bool),
-		SavedAlbums:  make(map[string]bool),
-		SavedArtists: make(map[string]bool),
+		path:        path,
+		Tracks:      make(map[string]string),
+		Albums:      make(map[string]string),
+		Playlists:   make(map[string]*PlaylistEntry),
+		SavedLikes:  make(map[string]bool),
+		SavedAlbums: make(map[string]bool),
 	}
 
 	data, err := os.ReadFile(path)
@@ -59,9 +55,6 @@ func Load(path string) (*Cache, error) {
 	if c.Albums == nil {
 		c.Albums = make(map[string]string)
 	}
-	if c.Artists == nil {
-		c.Artists = make(map[string]string)
-	}
 	if c.Playlists == nil {
 		c.Playlists = make(map[string]*PlaylistEntry)
 	}
@@ -75,9 +68,6 @@ func Load(path string) (*Cache, error) {
 	}
 	if c.SavedAlbums == nil {
 		c.SavedAlbums = make(map[string]bool)
-	}
-	if c.SavedArtists == nil {
-		c.SavedArtists = make(map[string]bool)
 	}
 
 	return c, nil
@@ -128,19 +118,6 @@ func (c *Cache) SetAlbum(yandexID, spotifyID string) {
 	c.Albums[yandexID] = spotifyID
 }
 
-func (c *Cache) GetArtist(yandexID string) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	id, ok := c.Artists[yandexID]
-	return id, ok
-}
-
-func (c *Cache) SetArtist(yandexID, spotifyID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.Artists[yandexID] = spotifyID
-}
-
 func (c *Cache) GetPlaylist(yandexKind string) (*PlaylistEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -187,16 +164,4 @@ func (c *Cache) MarkAlbumSaved(spotifyID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.SavedAlbums[spotifyID] = true
-}
-
-func (c *Cache) IsArtistSaved(spotifyID string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.SavedArtists[spotifyID]
-}
-
-func (c *Cache) MarkArtistSaved(spotifyID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.SavedArtists[spotifyID] = true
 }

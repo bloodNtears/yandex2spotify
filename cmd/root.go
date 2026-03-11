@@ -13,10 +13,9 @@ import (
 
 	"github.com/bloodNtears/yandex2spotify/internal/cache"
 	"github.com/bloodNtears/yandex2spotify/internal/importer"
+	"github.com/bloodNtears/yandex2spotify/internal/spotify"
 	"github.com/bloodNtears/yandex2spotify/internal/yandex"
 	"github.com/spf13/cobra"
-	"github.com/zmb3/spotify/v2"
-	spotifyauth "github.com/zmb3/spotify/v2/auth"
 	"golang.org/x/oauth2"
 )
 
@@ -34,23 +33,19 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "yandex2spotify",
 	Short: "Import music from Yandex Music to Spotify",
-	Long:  "A CLI tool that imports liked tracks, playlists, albums, and artists from Yandex Music to Spotify.",
+	Long:  "A CLI tool that imports liked tracks, playlists, and albums from Yandex Music to Spotify.",
 	RunE:  run,
 }
 
 func defaultCachePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".yandex2spotify-cache.json"
-	}
-	return filepath.Join(home, ".yandex2spotify", "cache.json")
+	return filepath.Join("tmp", "cache", "cache.json")
 }
 
 func init() {
 	rootCmd.Flags().StringVar(&spotifyID, "spotify-id", "", "Spotify application Client ID (required)")
 	rootCmd.Flags().StringVar(&spotifySecret, "spotify-secret", "", "Spotify application Client Secret (required)")
 	rootCmd.Flags().StringVarP(&yandexToken, "yandex-token", "t", "", "Yandex Music OAuth token (required)")
-	rootCmd.Flags().StringSliceVarP(&ignoreItems, "ignore", "i", nil, "Items to skip: likes,playlists,albums,artists")
+	rootCmd.Flags().StringSliceVarP(&ignoreItems, "ignore", "i", nil, "Items to skip: likes,playlists,albums")
 	rootCmd.Flags().Float64Var(&timeout, "timeout", 10, "HTTP request timeout in seconds")
 	rootCmd.Flags().StringVar(&cacheFile, "cache-file", defaultCachePath(), "Path to the search results cache file")
 
@@ -96,21 +91,26 @@ func run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func authenticateSpotify(ctx context.Context) (*spotify.Client, error) {
-	auth := spotifyauth.New(
-		spotifyauth.WithClientID(spotifyID),
-		spotifyauth.WithClientSecret(spotifySecret),
-		spotifyauth.WithRedirectURL(redirectURI),
-		spotifyauth.WithScopes(
-			spotifyauth.ScopePlaylistModifyPublic,
-			spotifyauth.ScopeUserLibraryModify,
-			spotifyauth.ScopeUserFollowModify,
-		),
-	)
+var spotifyScopes = []string{
+	"playlist-modify-public",
+	"playlist-modify-private",
+	"playlist-read-private",
+	"playlist-read-collaborative",
+	"user-library-modify",
+}
 
+func authenticateSpotify(ctx context.Context) (*spotify.Client, error) {
 	state := fmt.Sprintf("yandex2spotify-%d", time.Now().UnixNano())
 
-	authURL := auth.AuthURL(state)
+	params := url.Values{}
+	params.Set("client_id", spotifyID)
+	params.Set("response_type", "code")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("scope", strings.Join(spotifyScopes, " "))
+	params.Set("state", state)
+
+	authURL := "https://accounts.spotify.com/authorize?" + params.Encode()
+
 	log.Println("Please log in to Spotify by visiting the following URL in your browser:")
 	fmt.Println()
 	fmt.Println(authURL)
@@ -162,7 +162,9 @@ func authenticateSpotify(ctx context.Context) (*spotify.Client, error) {
 		return nil, fmt.Errorf("exchange authorization code: %w", err)
 	}
 
-	client := spotify.New(auth.Client(ctx, tok), spotify.WithRetry(true))
+	httpClient := oauthCfg.Client(ctx, tok)
+	client := spotify.NewClient(httpClient)
+
 	log.Println("Spotify authentication successful!")
 	return client, nil
 }

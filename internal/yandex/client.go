@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,7 +170,7 @@ func (c *Client) Tracks(ctx context.Context, ids []string) ([]Track, error) {
 	return result.Result, nil
 }
 
-func (c *Client) LikedAlbums(ctx context.Context, uid uint32) ([]Album, error) {
+func (c *Client) LikedAlbumIDs(ctx context.Context, uid uint32) ([]int, error) {
 	path := fmt.Sprintf("users/%d/likes/albums", uid)
 	body, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -184,31 +185,54 @@ func (c *Client) LikedAlbums(ctx context.Context, uid uint32) ([]Album, error) {
 		return nil, fmt.Errorf("liked albums: %s", resp.Error)
 	}
 
-	albums := make([]Album, len(resp.Result))
+	ids := make([]int, len(resp.Result))
 	for i, la := range resp.Result {
-		albums[i] = la.Album
+		ids[i] = la.ID
 	}
-	return albums, nil
+	return ids, nil
 }
 
-func (c *Client) LikedArtists(ctx context.Context, uid uint32) ([]Artist, error) {
-	path := fmt.Sprintf("users/%d/likes/artists", uid)
-	body, err := c.do(ctx, http.MethodGet, path, nil)
+func (c *Client) Albums(ctx context.Context, ids []int) ([]Album, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = strconv.Itoa(id)
+	}
+
+	uri := baseURL + "/albums"
+	form := url.Values{"album-ids": {strings.Join(strs, ",")}}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "OAuth "+c.token)
+	req.Header.Set("X-Yandex-Music-Client", "YandexMusicAndroid/24023231")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("albums: unexpected status %d", resp.StatusCode)
 	}
 
-	var resp likedArtistsResp
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode liked artists: %w", err)
+	var result albumsResp
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		return nil, fmt.Errorf("decode albums: %w", err)
 	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("liked artists: %s", resp.Error)
+	if result.Error != "" {
+		return nil, fmt.Errorf("albums: %s", result.Error)
 	}
-
-	artists := make([]Artist, len(resp.Result))
-	for i, la := range resp.Result {
-		artists[i] = la.Artist
-	}
-	return artists, nil
+	return result.Result, nil
 }

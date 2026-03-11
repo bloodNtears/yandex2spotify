@@ -1,18 +1,23 @@
-# yandex2spotify
+# yandex2spotify 2026
 
-A Go CLI tool that imports liked tracks, playlists, albums, and artists from Yandex Music to Spotify.
+Утилита на Go для переноса медиатеки из Яндекс.Музыки в Spotify: лайкнутые треки, плейлисты и альбомы.
 
-Inspired by [yandex2spotify](https://github.com/MarshalX/yandex2spotify).
+## Важно знать!
 
-## Installation
+- Для создания Spotify-приложения нужен **Premium-аккаунт**
+- В режиме Development лимит Spotify-приложения — **~700 поисковых запросов в сутки**. По правилам Spotify повысить лимиты может только юр. лицо.
+- Если треков больше 700, потребуется **несколько запусков** — кэш сохраняет прогресс между ними
+- Треки, которые не удалось найти, не прерывают работу — они выводятся в конце отдельным списком
 
-Requires Go 1.21 or higher.
+## Установка
+
+Требуется Go 1.21 или выше (`brew install go` или [скачать с официального сайта](https://go.dev/dl/)).
 
 ```bash
 go install github.com/bloodNtears/yandex2spotify@latest
 ```
 
-Or build from source:
+Или сборка из исходников:
 
 ```bash
 git clone https://github.com/bloodNtears/yandex2spotify.git
@@ -20,65 +25,111 @@ cd yandex2spotify
 go build -o yandex2spotify .
 ```
 
-## Prerequisites
+## Предварительная настройка
 
-1. **Spotify OAuth application** — register at https://developer.spotify.com/dashboard and add `https://open.spotify.com` as a Redirect URI.
+### 1. Создание Spotify-приложения
 
-2. **Yandex Music OAuth token** — since there is no public OAuth scope for Yandex Music, you need to extract the token from a `music.yandex.ru` browser session (look for the `OAuth` token in request headers via browser DevTools).
+> **Важно:** для создания приложения через Spotify Developer Dashboard необходим **Premium-аккаунт** Spotify.
 
-## Usage
+1. Перейдите на [https://developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) и авторизуйтесь.
+2. Нажмите **Create App**.
+3. Заполните название и описание (любые).
+4. В поле **Redirect URI** укажите: `https://open.spotify.com`
+5. Сохраните приложение.
+6. Скопируйте **Client ID** и **Client Secret** — они понадобятся для запуска утилиты.
+
+Созданное приложение будет в режиме **Development** с ограничением примерно **700 поисковых запросов в сутки!**. Этого может не хватить для переноса большой коллекции за один запуск. Для минимизации этого ограничения в утилите реализован кэш результатов поиска — при повторном запуске уже найденные треки/альбомы не будут искаться заново. Просто запускайте утилиту несколько раз, пока весь перенос не завершится.
+
+### 2. Получение токена Яндекс.Музыки
+
+Своё OAuth-приложение с правами на Яндекс.Музыку создать нельзя, поэтому используются токены от существующих клиентов. Несколько способов:
+
+#### Способ 1: Через консоль браузера (рекомендуемый)
+
+1. Откройте [https://oauth.yandex.ru](https://oauth.yandex.ru) и авторизуйтесь.
+2. Откройте консоль разработчика (F12 → Console).
+3. Выполните:
+
+```javascript
+fetch(
+  "https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d",
+)
+  .then((a) => a.text())
+  .then((a) => console.log(a.match(/access_token=(.*?)&/)[1]));
+```
+
+4. Скопируйте выведенный токен.
+
+#### Способ 2: Через браузер с DevTools
+
+1. Откройте DevTools в браузере, на вкладке **Network** включите **Preserve log** (Chrome) или **Непрерывный лог** (Firefox).
+2. Перейдите по ссылке: `https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d`
+3. Авторизуйтесь при необходимости.
+4. Браузер перенаправит на адрес вида `https://music.yandex.ru/#access_token=AQA...&token_type=bearer&expires_in=...` — скопируйте значение `access_token` из URL.
+
+
+Подробнее о получении токена: [обсуждение на GitHub](https://github.com/MarshalX/yandex-music-api/discussions/513).
+
+## Использование
 
 ```bash
 ./yandex2spotify \
-  --spotify-id <ID> \
-  --spotify-secret <SECRET> \
+  --spotify-id <CLIENT_ID> \
+  --spotify-secret <CLIENT_SECRET> \
   --yandex-token <TOKEN>
 ```
 
-The tool will print a Spotify authorization URL. Open it in your browser, log in, and after authorizing you'll be redirected to `open.spotify.com`. Copy the full URL from your browser's address bar and paste it back into the terminal. The import will then begin automatically.
+Утилита выведет URL для авторизации в Spotify. Откройте его в браузере, авторизуйтесь, и после редиректа на `open.spotify.com` скопируйте полный URL из адресной строки и вставьте его в терминал. Импорт начнётся автоматически.
 
-### Skipping item types
+### Пропуск типов элементов
 
-Use `--ignore` to skip certain item types:
+Используйте `--ignore` для пропуска определённых типов:
 
 ```bash
-# Import only playlists (skip likes, albums, artists)
+# Импортировать только плейлисты (пропустить лайки и альбомы)
 yandex2spotify \
   --spotify-id <ID> --spotify-secret <SECRET> -t <TOKEN> \
-  --ignore likes,albums,artists
+  --ignore likes,albums
 
-# Import everything except artists
+# Импортировать всё, кроме альбомов
 yandex2spotify \
   --spotify-id <ID> --spotify-secret <SECRET> -t <TOKEN> \
-  --ignore artists
+  --ignore albums
 ```
 
-Valid values for `--ignore`: `likes`, `playlists`, `albums`, `artists`.
+Допустимые значения для `--ignore`: `likes`, `playlists`, `albums`.
 
-### All flags
+### Все флаги
 
-| Flag               | Short | Description                     | Default    |
-|--------------------|-------|---------------------------------|------------|
-| `--spotify-id`     |       | Spotify Client ID               | (required) |
-| `--spotify-secret` |       | Spotify Client Secret           | (required) |
-| `--yandex-token`   | `-t`  | Yandex Music OAuth token        | (required) |
-| `--ignore`         | `-i`  | Item types to skip              | (none)     |
-| `--timeout`        |       | HTTP request timeout in seconds | `10`       |
-| `--cache-file`     |       | Path to search results cache    | `~/.yandex2spotify/cache.json` |
+| Флаг               | Сокращение | Описание                         | По умолчанию           |
+|--------------------|------------|----------------------------------|------------------------|
+| `--spotify-id`     |            | Spotify Client ID                | (обязательный)         |
+| `--spotify-secret` |            | Spotify Client Secret            | (обязательный)         |
+| `--yandex-token`   | `-t`       | Токен Яндекс.Музыки              | (обязательный)         |
+| `--ignore`         | `-i`       | Типы элементов для пропуска      | (нет)                  |
+| `--timeout`        |            | Таймаут HTTP-запросов в секундах | `10`                   |
+| `--cache-file`     |            | Путь к файлу кэша                | `tmp/cache/cache.json` |
 
-## How it works
+## Как это работает
 
-1. Authenticates with Yandex Music using the provided token
-2. Authenticates with Spotify via OAuth2 (user pastes redirect URL from browser)
-3. For each enabled item type:
-   - **Likes**: fetches liked tracks, searches each on Spotify, saves matches to your library
-   - **Playlists**: fetches playlists and their tracks, creates corresponding playlists on Spotify, adds matched tracks
-   - **Albums**: fetches liked albums, searches on Spotify, saves matches to your library
-   - **Artists**: fetches liked artists, searches on Spotify, follows matches
-4. Prints a summary of items that could not be found on Spotify
+1. Авторизация в Яндекс.Музыке по токену.
+2. Авторизация в Spotify через OAuth2 (пользователь вставляет URL редиректа из браузера).
+3. Для каждого включённого типа:
+   - **Лайки**: загрузка лайкнутых треков, поиск каждого в Spotify, сохранение найденных в библиотеку.
+   - **Плейлисты**: загрузка плейлистов и их треков, создание соответствующих плейлистов в Spotify, добавление найденных треков.
+   - **Альбомы**: загрузка лайкнутых альбомов, поиск в Spotify, сохранение найденных в библиотеку.
+4. Вывод списка элементов, которые не удалось найти в Spotify.
 
-Successfully matched items are cached to `~/.yandex2spotify/cache.json`. If the process is interrupted, re-running the command will skip already-matched items and resume from where it left off. Items that were not found are always re-searched.
+## Кэш и стратегия перезапуска
 
-## License
+Результаты поиска кэшируются в файле `tmp/cache/cache.json` (по умолчанию). Если процесс прерван или достигнут лимит API Spotify:
+
+- При повторном запуске уже найденные элементы будут пропущены.
+- Элементы, которые не были найдены, будут искаться заново.
+- **Запускайте утилиту несколько раз**, пока все элементы не будут импортированы.
+
+Кэш также сохраняет информацию о том, какие треки/альбомы уже были сохранены в Spotify, поэтому дубликатов не будет.
+
+## Лицензия
 
 MIT

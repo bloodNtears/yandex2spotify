@@ -1,16 +1,21 @@
 package importer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bloodNtears/yandex2spotify/internal/cache"
+	"github.com/bloodNtears/yandex2spotify/internal/spotify"
 	"github.com/bloodNtears/yandex2spotify/internal/yandex"
-	"github.com/zmb3/spotify/v2"
 	"golang.org/x/time/rate"
 )
 
@@ -34,19 +39,19 @@ func New(yc *yandex.Client, sc *spotify.Client, c *cache.Cache) (*Importer, erro
 	}
 	log.Printf("Yandex user: %s (uid %d)", status.Account.DisplayName, status.Account.UID)
 
-	spotifyUser, err := sc.CurrentUser(ctx)
+	spotifyUID, err := sc.CurrentUserID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get spotify user: %w", err)
 	}
-	log.Printf("Spotify user: %s", spotifyUser.ID)
+	log.Printf("Spotify user: %s", spotifyUID)
 
 	return &Importer{
 		yandex:      yc,
 		spotify:     sc,
-		spotifyUID:  spotifyUser.ID,
+		spotifyUID:  spotifyUID,
 		yandexUID:   status.Account.UID,
 		cache:       c,
-		limiter:     rate.NewLimiter(rate.Every(500*time.Millisecond), 1), // ~3.33 rps, burst 1
+		limiter:     rate.NewLimiter(rate.Every(500*time.Millisecond), 1),
 		notImported: make(map[string][]string),
 	}, nil
 }
@@ -60,9 +65,6 @@ func (imp *Importer) ImportAll(ctx context.Context, ignore map[string]bool) {
 	}
 	if !ignore["albums"] {
 		imp.importAlbums(ctx)
-	}
-	if !ignore["artists"] {
-		imp.importArtists(ctx)
 	}
 
 	imp.printNotImported()
@@ -100,9 +102,9 @@ func (imp *Importer) importLikes(ctx context.Context) {
 		return
 	}
 
-	var newIDs []spotify.ID
+	var newIDs []string
 	for _, id := range spotifyIDs {
-		if !imp.cache.IsLikeSaved(string(id)) {
+		if !imp.cache.IsLikeSaved(id) {
 			newIDs = append(newIDs, id)
 		}
 	}
@@ -114,19 +116,191 @@ func (imp *Importer) importLikes(ctx context.Context) {
 	log.Printf("%d of %d liked tracks already saved, saving %d new",
 		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
 
-	for _, chunk := range chunkIDs(newIDs, 50) {
+	for _, chunk := range chunkIDs(newIDs, 40) {
 		log.Printf("Saving %d liked tracks...", len(chunk))
-		if err := imp.spotify.AddTracksToLibrary(ctx, chunk...); err != nil {
+		if err := saveTracksToLibrary(ctx, imp.spotify.HTTPClient(), chunk); err != nil {
 			log.Printf("ERROR: save liked tracks: %v", err)
 			continue
 		}
 		for _, id := range chunk {
-			imp.cache.MarkLikeSaved(string(id))
+			imp.cache.MarkLikeSaved(id)
 		}
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("WARNING: save cache: %v", err)
 		}
 	}
+}
+
+func saveTracksToLibrary(ctx context.Context, httpClient *http.Client, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	uris := make([]string, 0, len(ids))
+	for _, id := range ids {
+		uris = append(uris, "spotify:track:"+id)
+	}
+
+	q := url.Values{}
+	q.Set("uris", strings.Join(uris, ","))
+
+	endpoint := "https://api.spotify.com/v1/me/library?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("spotify save library failed: status=%s body=%s", resp.Status, string(raw))
+	}
+
+	return nil
+}
+
+func saveAlbumsToLibrary(ctx context.Context, httpClient *http.Client, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if len(ids) > 40 {
+		return fmt.Errorf("too many ids: got %d, max 40", len(ids))
+	}
+
+	uris := make([]string, 0, len(ids))
+	for _, id := range ids {
+		uris = append(uris, "spotify:album:"+id)
+	}
+
+	q := url.Values{}
+	q.Set("uris", strings.Join(uris, ","))
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPut,
+		"https://api.spotify.com/v1/me/library?"+q.Encode(),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("spotify save albums failed: status=%s body=%s", resp.Status, string(raw))
+	}
+
+	return nil
+}
+
+func addItemsToPlaylist(ctx context.Context, httpClient *http.Client, playlistID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if len(ids) > 100 {
+		return fmt.Errorf("too many ids: got %d, max 100", len(ids))
+	}
+
+	uris := make([]string, 0, len(ids))
+	for _, id := range ids {
+		uris = append(uris, "spotify:track:"+id)
+	}
+
+	payload := struct {
+		URIs []string `json:"uris"`
+	}{
+		URIs: uris,
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("https://api.spotify.com/v1/playlists/%s/items", playlistID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("spotify add playlist items failed: status=%s body=%s", resp.Status, string(raw))
+	}
+
+	return nil
+}
+
+func createPlaylist(ctx context.Context, httpClient *http.Client, title string, public bool, description string) (string, error) {
+	payload := map[string]any{
+		"name":        title,
+		"public":      public,
+		"description": description,
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"https://api.spotify.com/v1/me/playlists",
+		bytes.NewReader(b),
+	)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("create playlist failed: status=%s body=%s", resp.Status, string(raw))
+	}
+
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+
+	return out.ID, nil
 }
 
 func (imp *Importer) importPlaylists(ctx context.Context) {
@@ -169,22 +343,21 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 		return
 	}
 
-	var spotifyPlaylistID spotify.ID
+	var spotifyPlaylistID string
 	if entry, ok := imp.cache.GetPlaylist(cacheKey); ok {
-		spotifyPlaylistID = spotify.ID(entry.SpotifyID)
+		spotifyPlaylistID = entry.SpotifyID
 		log.Printf("Using cached Spotify playlist for %q (ID: %s)", pl.Title, spotifyPlaylistID)
 	} else {
-		spotifyPlaylist, err := imp.spotify.CreatePlaylistForUser(ctx, imp.spotifyUID, pl.Title, "", false, false)
+		spotifyPlaylistID, err = createPlaylist(ctx, imp.spotify.HTTPClient(), pl.Title, false, "")
 		if err != nil {
 			log.Printf("ERROR: create Spotify playlist %q: %v", pl.Title, err)
 			return
 		}
-		spotifyPlaylistID = spotifyPlaylist.ID
-		imp.cache.SetPlaylist(cacheKey, string(spotifyPlaylistID))
+		imp.cache.SetPlaylist(cacheKey, spotifyPlaylistID)
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("WARNING: save cache: %v", err)
 		}
-		log.Printf("Created Spotify playlist: %s (ID: %s)", spotifyPlaylist.Name, spotifyPlaylistID)
+		log.Printf("Created Spotify playlist: %s (ID: %s)", pl.Title, spotifyPlaylistID)
 	}
 
 	spotifyIDs := imp.searchTracks(ctx, tracks, section)
@@ -194,9 +367,9 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 	}
 
 	entry, _ := imp.cache.GetPlaylist(cacheKey)
-	var newIDs []spotify.ID
+	var newIDs []string
 	for _, id := range spotifyIDs {
-		if !entry.AddedTracks[string(id)] {
+		if !entry.AddedTracks[id] {
 			newIDs = append(newIDs, id)
 		}
 	}
@@ -210,13 +383,14 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 
 	for _, chunk := range chunkIDs(newIDs, 100) {
 		log.Printf("Adding %d tracks to playlist %q...", len(chunk), pl.Title)
-		_, err := imp.spotify.AddTracksToPlaylist(ctx, spotifyPlaylistID, chunk...)
-		if err != nil {
+
+		if err := addItemsToPlaylist(ctx, imp.spotify.HTTPClient(), spotifyPlaylistID, chunk); err != nil {
 			log.Printf("ERROR: add tracks to playlist: %v", err)
 			continue
 		}
+
 		for _, id := range chunk {
-			imp.cache.AddPlaylistTrack(cacheKey, string(id))
+			imp.cache.AddPlaylistTrack(cacheKey, id)
 		}
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("WARNING: save cache: %v", err)
@@ -227,18 +401,25 @@ func (imp *Importer) importPlaylist(ctx context.Context, pl yandex.Playlist) {
 func (imp *Importer) importAlbums(ctx context.Context) {
 	log.Println("Importing albums...")
 
-	albums, err := imp.yandex.LikedAlbums(ctx, imp.yandexUID)
+	albumIDs, err := imp.yandex.LikedAlbumIDs(ctx, imp.yandexUID)
 	if err != nil {
-		log.Printf("ERROR: fetch liked albums: %v", err)
+		log.Printf("ERROR: fetch liked album IDs: %v", err)
 		return
 	}
-	log.Printf("Found %d liked albums", len(albums))
+	log.Printf("Found %d liked albums, fetching details...", len(albumIDs))
+
+	albums, err := imp.yandex.Albums(ctx, albumIDs)
+	if err != nil {
+		log.Printf("ERROR: fetch album details: %v", err)
+		return
+	}
+	log.Printf("Loaded details for %d albums", len(albums))
 
 	section := "Albums"
 	imp.notImported[section] = nil
 
 	total := len(albums)
-	var spotifyIDs []spotify.ID
+	var spotifyIDs []string
 	for i := len(albums) - 1; i >= 0; i-- {
 		a := albums[i]
 		name := formatAlbumName(a)
@@ -247,24 +428,31 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 
 		if sid, ok := imp.cache.GetAlbum(yandexKey); ok {
 			log.Printf("[%d/%d] Importing album: %s... CACHED", progress, total, name)
-			spotifyIDs = append(spotifyIDs, spotify.ID(sid))
+			spotifyIDs = append(spotifyIDs, sid)
 			continue
 		}
 
-		query := buildAlbumQuery(a)
-		log.Printf("[%d/%d] Importing album: %s...", progress, total, name)
-		results, err := imp.throttledSearch(ctx, query, spotify.SearchTypeAlbum)
+		query := strings.TrimSpace(buildAlbumQuery(a))
+		log.Printf("[%d/%d] Importing album: %s... query=%q", progress, total, name, query)
+
+		if query == "" {
+			log.Printf("  ERROR: empty album search query")
+			imp.notImported[section] = append(imp.notImported[section], name)
+			continue
+		}
+
+		results, err := imp.throttledSearch(ctx, query, "album")
 		if err != nil {
 			log.Printf("  ERROR: search: %v", err)
 			imp.notImported[section] = append(imp.notImported[section], name)
 			continue
 		}
 
-		if results.Albums == nil || len(results.Albums.Albums) == 0 {
+		if results.Albums == nil || len(results.Albums.Items) == 0 {
 			if len(a.Artists) > 1 {
 				query = fmt.Sprintf("%s %s", a.Artists[0].Name, a.Title)
-				results, err = imp.throttledSearch(ctx, query, spotify.SearchTypeAlbum)
-				if err != nil || results.Albums == nil || len(results.Albums.Albums) == 0 {
+				results, err = imp.throttledSearch(ctx, query, "album")
+				if err != nil || results.Albums == nil || len(results.Albums.Items) == 0 {
 					log.Printf("  NOT FOUND")
 					imp.notImported[section] = append(imp.notImported[section], name)
 					continue
@@ -276,9 +464,9 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 			}
 		}
 
-		sid := results.Albums.Albums[0].ID
+		sid := results.Albums.Items[0].ID
 		spotifyIDs = append(spotifyIDs, sid)
-		imp.cache.SetAlbum(yandexKey, string(sid))
+		imp.cache.SetAlbum(yandexKey, sid)
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("  WARNING: save cache: %v", err)
 		}
@@ -290,9 +478,9 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 		return
 	}
 
-	var newIDs []spotify.ID
+	var newIDs []string
 	for _, id := range spotifyIDs {
-		if !imp.cache.IsAlbumSaved(string(id)) {
+		if !imp.cache.IsAlbumSaved(id) {
 			newIDs = append(newIDs, id)
 		}
 	}
@@ -304,14 +492,14 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 	log.Printf("%d of %d albums already saved, saving %d new",
 		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
 
-	for _, chunk := range chunkIDs(newIDs, 50) {
+	for _, chunk := range chunkIDs(newIDs, 40) {
 		log.Printf("Saving %d albums...", len(chunk))
-		if err := imp.spotify.AddAlbumsToLibrary(ctx, chunk...); err != nil {
+		if err := saveAlbumsToLibrary(ctx, imp.spotify.HTTPClient(), chunk); err != nil {
 			log.Printf("ERROR: save albums: %v", err)
 			continue
 		}
 		for _, id := range chunk {
-			imp.cache.MarkAlbumSaved(string(id))
+			imp.cache.MarkAlbumSaved(id)
 		}
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("WARNING: save cache: %v", err)
@@ -319,91 +507,8 @@ func (imp *Importer) importAlbums(ctx context.Context) {
 	}
 }
 
-func (imp *Importer) importArtists(ctx context.Context) {
-	log.Println("Importing artists...")
-
-	artists, err := imp.yandex.LikedArtists(ctx, imp.yandexUID)
-	if err != nil {
-		log.Printf("ERROR: fetch liked artists: %v", err)
-		return
-	}
-	log.Printf("Found %d liked artists", len(artists))
-
-	section := "Artists"
-	imp.notImported[section] = nil
-
-	total := len(artists)
-	var spotifyIDs []spotify.ID
-	for i := len(artists) - 1; i >= 0; i-- {
-		a := artists[i]
-		yandexKey := strconv.Itoa(a.ID)
-		progress := total - i
-
-		if sid, ok := imp.cache.GetArtist(yandexKey); ok {
-			log.Printf("[%d/%d] Importing artist: %s... CACHED", progress, total, a.Name)
-			spotifyIDs = append(spotifyIDs, spotify.ID(sid))
-			continue
-		}
-
-		log.Printf("[%d/%d] Importing artist: %s...", progress, total, a.Name)
-		results, err := imp.throttledSearch(ctx, a.Name, spotify.SearchTypeArtist)
-		if err != nil {
-			log.Printf("  ERROR: search: %v", err)
-			imp.notImported[section] = append(imp.notImported[section], a.Name)
-			continue
-		}
-
-		if results.Artists == nil || len(results.Artists.Artists) == 0 {
-			log.Printf("  NOT FOUND")
-			imp.notImported[section] = append(imp.notImported[section], a.Name)
-			continue
-		}
-
-		sid := results.Artists.Artists[0].ID
-		spotifyIDs = append(spotifyIDs, sid)
-		imp.cache.SetArtist(yandexKey, string(sid))
-		if err := imp.cache.Save(); err != nil {
-			log.Printf("  WARNING: save cache: %v", err)
-		}
-		log.Printf("  OK")
-	}
-
-	if len(spotifyIDs) == 0 {
-		log.Println("No artists matched on Spotify")
-		return
-	}
-
-	var newIDs []spotify.ID
-	for _, id := range spotifyIDs {
-		if !imp.cache.IsArtistSaved(string(id)) {
-			newIDs = append(newIDs, id)
-		}
-	}
-
-	if len(newIDs) == 0 {
-		log.Printf("All %d artists already followed, skipping", len(spotifyIDs))
-		return
-	}
-	log.Printf("%d of %d artists already followed, following %d new",
-		len(spotifyIDs)-len(newIDs), len(spotifyIDs), len(newIDs))
-
-	for _, chunk := range chunkIDs(newIDs, 50) {
-		log.Printf("Following %d artists...", len(chunk))
-		if err := imp.spotify.FollowArtist(ctx, chunk...); err != nil {
-			log.Printf("ERROR: follow artists: %v", err)
-			continue
-		}
-		for _, id := range chunk {
-			imp.cache.MarkArtistSaved(string(id))
-		}
-		if err := imp.cache.Save(); err != nil {
-			log.Printf("WARNING: save cache: %v", err)
-		}
-	}
-}
-
-func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, section string) []spotify.ID {
-	var spotifyIDs []spotify.ID
+func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, section string) []string {
+	var spotifyIDs []string
 	total := len(tracks)
 
 	for i := len(tracks) - 1; i >= 0; i-- {
@@ -414,7 +519,7 @@ func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, se
 
 		if sid, ok := imp.cache.GetTrack(yandexKey); ok {
 			log.Printf("[%d/%d] Importing track: %s... CACHED", progress, total, name)
-			spotifyIDs = append(spotifyIDs, spotify.ID(sid))
+			spotifyIDs = append(spotifyIDs, sid)
 			continue
 		}
 
@@ -425,18 +530,18 @@ func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, se
 		}
 
 		log.Printf("[%d/%d] Importing track: %s...", progress, total, name)
-		results, err := imp.throttledSearch(ctx, query, spotify.SearchTypeTrack)
+		results, err := imp.throttledSearch(ctx, query, "track")
 		if err != nil {
 			log.Printf("  ERROR: search: %v", err)
 			imp.notImported[section] = append(imp.notImported[section], name)
 			continue
 		}
 
-		if results.Tracks == nil || len(results.Tracks.Tracks) == 0 {
+		if results.Tracks == nil || len(results.Tracks.Items) == 0 {
 			if len(t.Artists) > 1 {
 				query = fmt.Sprintf("%s %s", t.Artists[0].Name, t.Title)
-				results, err = imp.throttledSearch(ctx, query, spotify.SearchTypeTrack)
-				if err != nil || results.Tracks == nil || len(results.Tracks.Tracks) == 0 {
+				results, err = imp.throttledSearch(ctx, query, "track")
+				if err != nil || results.Tracks == nil || len(results.Tracks.Items) == 0 {
 					log.Printf("  NOT FOUND")
 					imp.notImported[section] = append(imp.notImported[section], name)
 					continue
@@ -448,9 +553,9 @@ func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, se
 			}
 		}
 
-		sid := results.Tracks.Tracks[0].ID
+		sid := results.Tracks.Items[0].ID
 		spotifyIDs = append(spotifyIDs, sid)
-		imp.cache.SetTrack(yandexKey, string(sid))
+		imp.cache.SetTrack(yandexKey, sid)
 		if err := imp.cache.Save(); err != nil {
 			log.Printf("  WARNING: save cache: %v", err)
 		}
@@ -460,7 +565,7 @@ func (imp *Importer) searchTracks(ctx context.Context, tracks []yandex.Track, se
 	return spotifyIDs
 }
 
-func (imp *Importer) throttledSearch(ctx context.Context, query string, searchType spotify.SearchType) (*spotify.SearchResult, error) {
+func (imp *Importer) throttledSearch(ctx context.Context, query, searchType string) (*spotify.SearchResult, error) {
 	if err := imp.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
@@ -524,8 +629,23 @@ func formatAlbumName(a yandex.Album) string {
 }
 
 func buildAlbumQuery(a yandex.Album) string {
-	name := formatAlbumName(a)
-	return strings.ReplaceAll(name, "- ", "")
+	title := strings.TrimSpace(a.Title)
+
+	var artist string
+	if len(a.Artists) > 0 {
+		artist = strings.TrimSpace(a.Artists[0].Name)
+	}
+
+	switch {
+	case title != "" && artist != "":
+		return fmt.Sprintf(`album:"%s" artist:"%s"`, title, artist)
+	case title != "":
+		return fmt.Sprintf(`album:"%s"`, title)
+	case artist != "":
+		return fmt.Sprintf(`artist:"%s"`, artist)
+	default:
+		return ""
+	}
 }
 
 func chunkIDs[T any](ids []T, size int) [][]T {

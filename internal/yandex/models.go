@@ -83,7 +83,7 @@ type likedTracksResp struct {
 }
 
 type LikedAlbum struct {
-	Album Album `json:"album"`
+	ID int `json:"id"`
 }
 
 type likedAlbumsResp struct {
@@ -91,13 +91,9 @@ type likedAlbumsResp struct {
 	Result []LikedAlbum `json:"result"`
 }
 
-type LikedArtist struct {
-	Artist Artist `json:"artist"`
-}
-
-type likedArtistsResp struct {
+type albumsResp struct {
 	responseBase
-	Result []LikedArtist `json:"result"`
+	Result []Album `json:"result"`
 }
 
 type tracksResp struct {
