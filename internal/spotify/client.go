@@ -19,6 +19,10 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{http: httpClient}
 }
 
+func (c *Client) HTTPClient() *http.Client {
+	return c.http
+}
+
 func (c *Client) CurrentUserID(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+"/me", nil)
 	if err != nil {
@@ -44,27 +48,6 @@ func (c *Client) CurrentUserID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	return out.ID, nil
-}
-
-type SearchResult struct {
-	Tracks *TracksPage `json:"tracks,omitempty"`
-	Albums *AlbumsPage `json:"albums,omitempty"`
-}
-
-type TracksPage struct {
-	Items []TrackItem `json:"items"`
-}
-
-type AlbumsPage struct {
-	Items []AlbumItem `json:"items"`
-}
-
-type TrackItem struct {
-	ID string `json:"id"`
-}
-
-type AlbumItem struct {
-	ID string `json:"id"`
 }
 
 func (c *Client) Search(ctx context.Context, query, searchType string) (*SearchResult, error) {
@@ -95,8 +78,4 @@ func (c *Client) Search(ctx context.Context, query, searchType string) (*SearchR
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &result, nil
-}
-
-func (c *Client) HTTPClient() *http.Client {
-	return c.http
 }
