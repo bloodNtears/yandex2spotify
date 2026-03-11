@@ -17,7 +17,13 @@
 go install github.com/bloodNtears/yandex2spotify@latest
 ```
 
-Или сборка из исходников:
+Бинарник установится в `$(go env GOPATH)/bin` (обычно `~/go/bin`). Если команда `yandex2spotify` не находится, добавьте в `~/.zshrc` (или `~/.bashrc`):
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+Или соберите из исходников — бинарник окажется в текущей директории:
 
 ```bash
 git clone https://github.com/bloodNtears/yandex2spotify.git
