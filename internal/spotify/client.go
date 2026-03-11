@@ -16,6 +16,11 @@ type Client struct {
 }
 
 func NewClient(httpClient *http.Client) *Client {
+	transport := httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	httpClient.Transport = &retryTransport{base: transport}
 	return &Client{http: httpClient}
 }
 
